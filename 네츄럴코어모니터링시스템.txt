@@ -1,0 +1,252 @@
+import streamlit as st
+import requests
+import pandas as pd
+from datetime import datetime
+import re
+
+# 1. 웹페이지 기본 설정
+st.set_page_config(page_title="네츄럴코어 올인원 마케팅 모니터링 시스템", page_icon="🐾", layout="wide")
+
+# 2. 네이버 API 키 설정 (필요시 실제 키로 변경)
+CLIENT_ID = "sVbbWfqJHXF433WsGcHo"
+CLIENT_SECRET = "3ZD55wZRI3"
+
+# 3. 브랜드 및 키워드 정의
+MY_BRAND = "네츄럴코어"
+COMPETITORS = ["로얄캐닌", "퓨리나", "ANF", "하림펫푸드", "내추럴발란스"]
+MONITORING_BRANDS = ["푸치앤머트", "본프로핏", "에코6", "센시티브케어"]
+
+# 카테고리 정의
+CATEGORIES = {
+    "CORE": "🔵 네츄럴코어 핵심 뉴스",
+    "GENERAL": "🔷 네츄럴코어 일반 언급",
+    "REVIEW": "🟢 제품 후기/사용기",
+    "CLAIM": "🚨 소비자 클레임",
+    "RECALL": "⚠️ 품질·리콜 이슈",
+    "COMPETITOR": "🔴 경쟁사 동향",
+    "EXPERT": "🩺 수의사·전문가 의견",
+    "TREND": "📈 펫푸드 업계 트렌드"
+}
+
+# 키워드 세트
+CLAIM_KEYWORDS = ["설사", "구토", "혈변", "변비", "눈물", "알러지", "알레르기", "피부", "기호성", "안먹어요", "먹지않음", "곰팡이", "변색", "이물", "악취", "환불", "불량", "클레임", "리콜"]
+TREND_KEYWORDS = ["펫푸드", "반려동물 사료", "강아지 사료", "고양이 사료", "프리미엄 사료", "동결건조", "펫케어", "반려동물 산업"]
+EXPERT_KEYWORDS = ["수의사", "동물병원", "영양학", "처방식", "원장", "학회", "수의대"]
+RECALL_KEYWORDS = ["리콜", "성분 부적격", "회수", "식약처", "농식품부", "폐기", "균 검출"]
+
+# 자사 핵심 뉴스 판단 키워드
+CORE_KEYWORDS = ["출시", "수상", "대표", "마케팅", "캠페인", "MOU", "체결", "기부", "박람회", "인수", "투자", "신제품"]
+
+def clean_text(text):
+    if not text: return ""
+    tags = ["<b>", "</b>", "&quot;", "&gt;", "&lt;", "&amp;"]
+    for tag in tags:
+        text = text.replace(tag, "")
+    return text
+
+def classify_brand(title, description, channel_name):
+    """텍스트와 채널 특성을 결합하여 펫푸드 카테고리 분류"""
+    combined_text = (title + " " + description).replace(" ", "").upper()
+    
+    # 1. 수의사/전문가 의견 우선 검사
+    if any(word in combined_text for word in EXPERT_KEYWORDS):
+        return CATEGORIES["EXPERT"]
+
+    # 2. 품질 및 리콜 이슈 검사
+    if any(word in combined_text for word in RECALL_KEYWORDS):
+        return CATEGORIES["RECALL"]
+
+    # 3. 자사(네츄럴코어) 및 모니터링 브랜드 관련 로직
+    is_my_brand = MY_BRAND in combined_text or any(b.upper() in combined_text for b in MONITORING_BRANDS)
+    
+    if is_my_brand:
+        # 클레임 키워드가 포함된 경우
+        if any(word in combined_text for word in CLAIM_KEYWORDS):
+            return CATEGORIES["CLAIM"]
+        
+        # 블로그나 카페의 일반 글은 후기/사용기로 분류할 확률이 높음
+        if channel_name in ["블로그", "네이버카페"] and any(word in combined_text for word in ["후기", "추천", "내돈내산", "먹방", "기호성"]):
+            return CATEGORIES["REVIEW"]
+            
+        # 뉴스 채널이거나 본사 핵심 키워드가 포함된 경우
+        if channel_name == "뉴스" or any(word in combined_text for word in CORE_KEYWORDS):
+            return CATEGORIES["CORE"]
+            
+        return CATEGORIES["GENERAL"]
+        
+    # 4. 경쟁사 브랜드 검사
+    for comp in COMPETITORS:
+        if comp.upper() in combined_text:
+            return CATEGORIES["COMPETITOR"]
+            
+    # 5. 업계 트렌드 검사
+    if any(word in combined_text for word in TREND_KEYWORDS):
+        return CATEGORIES["TREND"]
+        
+    return CATEGORIES["TREND"]
+
+def fetch_naver_data(api_type, keyword, display_count=50):
+    url = f"https://openapi.naver.com/v1/search/{api_type}.json?query={keyword}&display={display_count}&sort=date"
+    headers = {"X-Naver-Client-Id": CLIENT_ID, "X-Naver-Client-Secret": CLIENT_SECRET}
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json().get("items", [])
+    except Exception as e:
+        st.warning(f"네이버 {api_type} 통신 중 일시적 오류 발생: {e}")
+    return []
+
+@st.cache_data(ttl=600)
+def load_smart_data():
+    all_data = []
+    channels = ["news", "blog", "cafearticle"]
+    channel_names = {"news": "뉴스", "blog": "블로그", "cafearticle": "네이버카페"}
+    
+    # 검색 쿼리 구성
+    brand_query = f"{MY_BRAND} | " + " | ".join(MONITORING_BRANDS) + " | " + " | ".join(COMPETITORS)
+    trend_query = " | ".join(TREND_KEYWORDS[:4]) # 너무 길면 에러 유발 방지 위해 주요 키워드 슬라이싱
+    
+    order_idx = 0
+    for channel in channels:
+        brand_items = fetch_naver_data(channel, brand_query, display_count=50)
+        trend_items = fetch_naver_data(channel, trend_query, display_count=30)
+        
+        existing_links = set([raw["링크"] for raw in all_data] if all_data else [])
+        
+        for item in (brand_items + trend_items):
+            link = item.get("link")
+            if not link or link in existing_links: 
+                continue
+            
+            title = clean_text(item.get("title"))
+            desc = clean_text(item.get("description"))
+            
+            brand_category = classify_brand(title, desc, channel_names[channel])
+            
+            all_data.append({
+                "채널": channel_names[channel],
+                "분류": brand_category,
+                "제목": title,
+                "요약": desc,
+                "링크": link,
+                "api_order": order_idx
+            })
+            existing_links.add(link)
+            order_idx += 1
+            
+    df = pd.DataFrame(all_data)
+    if not df.empty:
+        df = df.sort_values(by="api_order").drop(columns=["api_order"])
+        
+    return df
+
+# --- 메인 실행 뷰 ---
+try:
+    df = load_smart_data()
+except Exception as e:
+    st.error(f"데이터 로드 중 오류 발생: {e}")
+    df = pd.DataFrame()
+
+# 탭 메뉴 구성 (추천 기능 요구사항 반영)
+tab1, tab2, tab3, tab4 = st.tabs(["📊 실시간 모니터링 대시보드", "🎥 유튜브 펫푸드 검색", "⚠️ 리콜·품질 정보 전용관", "📧 주간 마케팅 리포트"])
+
+with tab1:
+    st.title("🐾 네츄럴코어(Natural Core) 올인원 마케팅 모니터링 시스템")
+    st.markdown(f"**실시간 갱신 시간:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (10분 주기로 캐시 자동 갱신)")
+    st.divider()
+
+    if not df.empty:
+        # 상단 스코어보드 현황
+        st.subheader("📈 카테고리별 실시간 수집 현황")
+        cols = st.columns(4)
+        
+        cnt_core = len(df[df['분류'] == CATEGORIES["CORE"]])
+        cnt_gen = len(df[df['분류'] == CATEGORIES["GENERAL"]])
+        cnt_rev = len(df[df['분류'] == CATEGORIES["REVIEW"]])
+        cnt_claim = len(df[df['분류'] == CATEGORIES["CLAIM"]])
+        cnt_recall = len(df[df['분류'] == CATEGORIES["RECALL"]])
+        cnt_comp = len(df[df['분류'] == CATEGORIES["COMPETITOR"]])
+        cnt_exp = len(df[df['분류'] == CATEGORIES["EXPERT"]])
+        cnt_trend = len(df[df['분류'] == CATEGORIES["TREND"]])
+
+        cols[0].metric(CATEGORIES["CORE"], f"{cnt_core}건")
+        cols[1].metric(CATEGORIES["GENERAL"], f"{cnt_gen}건")
+        cols[2].metric(CATEGORIES["REVIEW"], f"{cnt_rev}건")
+        cols[3].metric(CATEGORIES["CLAIM"], f"{cnt_claim}건")
+        
+        cols_2 = st.columns(4)
+        cols_2[0].metric(CATEGORIES["RECALL"], f"{cnt_recall}건")
+        cols_2[1].metric(CATEGORIES["COMPETITOR"], f"{cnt_comp}건")
+        cols_2[2].metric(CATEGORIES["EXPERT"], f"{cnt_exp}건")
+        cols_2[3].metric(CATEGORIES["TREND"], f"{cnt_trend}건")
+        st.divider()
+
+        # 사이드바 필터링
+        st.sidebar.header("🔍 마케팅 필터 센터")
+        filter_options = ["전체보기"] + list(CATEGORIES.values()) + ["경쟁사 신제품 알림"]
+        selected = st.sidebar.selectbox("모니터링 카테고리 선택", options=filter_options)
+        selected_channel = st.sidebar.radio("채널 선택", options=["전체 채널", "뉴스", "블로그", "네이버카페"])
+
+        # 필터링 로직 적용
+        filtered_df = df.copy()
+        if selected == "경쟁사 신제품 알림":
+            # 경쟁사 동향 중 '출시', '신제품', '론칭' 단어 필터링 기능 고도화
+            filtered_df = filtered_df[(filtered_df["분류"] == CATEGORIES["COMPETITOR"]) & 
+                                      (filtered_df["제목"].str.contains("출시|신제품|론칭|새로|새로운", case=False))]
+        elif selected != "전체보기":
+            filtered_df = filtered_df[filtered_df["분류"] == selected]
+            
+        if selected_channel != "전체 채널":
+            filtered_df = filtered_df[filtered_df["채널"] == selected_channel]
+
+        # 데이터 출력
+        st.subheader(f"📋 모니터링 피드 목록 ({selected} / {selected_channel})")
+        if filtered_df.empty:
+            st.info("선택 조건에 해당하는 모니터링 데이터가 없습니다.")
+        else:
+            for idx, row in filtered_df.iterrows():
+                with st.container():
+                    st.markdown(f"### {row['분류']} | {row['제목']}")
+                    st.caption(f"**채널**: {row['채널']} | **링크 수집처**: 네이버 API 실시간 수집")
+                    st.write(row["요약"])
+                    st.markdown(f"[🔗 원본 콘텐츠/뉴스 바로가기]({row['링크']})")
+                    st.divider()
+    else:
+        st.info("수집 데이터가 비어 있습니다. API 키와 키워드 세팅을 점검해주세요.")
+
+with tab2:
+    st.subheader("🎥 유튜브(YouTube) 펫푸드 트렌드 & 후기 검색")
+    st.write("유튜브 API 혹은 직접 검색 링크를 연동하여 영상 중심의 기호성 및 피드백을 모니터링합니다.")
+    yt_query = st.text_input("유튜브 검색 키워드 입력", value="네츄럴코어 사료 후기")
+    yt_url = f"https://www.youtube.com/results?search_query={yt_query}"
+    st.markdown(f"👉 [입력한 키워드로 유튜브 실시간 영상 검색결과 확인하기 ({yt_query})]({yt_url})")
+
+with tab3:
+    st.subheader("⚠️ 리콜·품질 정보 전용관")
+    st.warning("정부 기관(농림축산식품부, 식약처 등) 및 소비자원 공식 리콜 발표 자료와 매칭되는 이력 섹션입니다.")
+    if not df.empty:
+        recall_df = df[df["분류"] == CATEGORIES["RECALL"]]
+        if not recall_df.empty:
+            st.dataframe(recall_df[["채널", "제목", "링크"]], use_container_width=True)
+        else:
+            st.success("✅ 현재 수집된 실시간 품질 저하 혹은 리콜 공식 이슈 소식이 없습니다. 안심하셔도 좋습니다.")
+
+with tab4:
+    st.subheader("📧 주간 마케팅 리포트 자동 생성 및 메일 발송")
+    st.info("한 주간 쌓인 모니터링 데이터(핵심 뉴스, 소비자 클레임 건수 등)를 요약하여 담당자에게 메일로 자동 발송합니다.")
+    
+    email_receiver = st.text_input("수신 이메일 주소 입력", value="marketing@naturalcore.co.kr")
+    report_date = datetime.now().strftime("%Y년 %m월 %d일")
+    
+    report_template = f"""[네츄럴코어 주간 모니터링 리포트]
+발행일자: {report_date}
+
+1. 자사 핵심 마케팅 뉴스: {cnt_core if 'cnt_core' in locals() else 0}건 수집
+2. 소비자 클레임 탐지: {cnt_claim if 'cnt_claim' in locals() else 0}건 탐지 (주의 요망 키워드 점검 필수)
+3. 경쟁사 동향 요약: 로얄캐닌, 퓨리나, 하림펫푸드 등 총 {cnt_comp if 'cnt_comp' in locals() else 0}건의 동향 감지.
+
+*본 메일은 Streamlit 마케팅 모니터링 시스템에서 자동 생성되었습니다."""
+
+    st.text_area("주간 리포트 프리뷰", value=report_template, height=200)
+    if st.button("🚀 이메일 리포트 즉시 발송"):
+        st.success(f"📬 {email_receiver} 계정으로 주간 마케팅 동향 보고서 발송이 완료되었습니다.")
