@@ -8,8 +8,8 @@ import re
 st.set_page_config(page_title="네츄럴코어 올인원 마케팅 모니터링 시스템", page_icon="🐾", layout="wide")
 
 # 2. 네이버 API 키 설정 (필요시 실제 키로 변경)
-CLIENT_ID = "sVbbWfqJHXF433WsGcHo"
-CLIENT_SECRET = "3ZD55wZRI3"
+CLIENT_ID = "kf3vqxIrs7SLpA7CCvFG"
+CLIENT_SECRET = "TU8iC8c0kA"
 
 # 3. 브랜드 및 키워드 정의
 MY_BRAND = "네츄럴코어"
